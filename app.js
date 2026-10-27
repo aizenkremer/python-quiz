@@ -133,7 +133,7 @@ function kickedScreen(msg) {
 }
 // ---------- главная ----------
 function home() {
-  stopPoll(); render = () => {};
+  stopPoll(); render = () => {}; clearRoomUI14();
   if (!APPS_SCRIPT_URL || APPS_SCRIPT_URL.includes('PASTE')) { $('#app').innerHTML = '<div class="card err">Не настроен APPS_SCRIPT_URL в config.js</div>'; return; }
   if (location.hash === '#teacher') return teacherHome();
   const saved = store.get('pq_student');
@@ -150,7 +150,7 @@ async function joinRoom(code, btn) {
   return { code, mid: r.mid, fio: L.fio, group: L.group };
 }
 function wizard(step) {
-  stopPoll(); render = () => {}; document.body.classList.remove('student', 'tv-open'); closeExtras();
+  stopPoll(); render = () => {}; clearRoomUI14(); document.body.classList.remove('student', 'tv-open'); closeExtras();
   const L = store.get('pq_last') || {}, back = to => `<button class="sec" data-back="${to}">← Назад</button>`;
   const roomInput = `<label>Код комнаты* (скажет преподаватель)<input id="room" maxlength="6" placeholder="ABC123" style="text-transform:uppercase;font-family:monospace;font-size:22px"></label>`;
   const V = {
@@ -774,6 +774,10 @@ function setTheme14(theme) {
   try { localStorage.setItem('pq_theme',theme); } catch(e) {}
   document.querySelectorAll('[data-theme-toggle]').forEach(b => { b.textContent = theme === 'dark' ? '☀ Светлая' : '☾ Тёмная'; b.setAttribute('aria-label', theme === 'dark' ? 'Включить светлую тему' : 'Включить тёмную тему'); });
   const meta = document.querySelector('meta[name="theme-color"]'); if (meta) meta.content = theme === 'dark' ? '#090d15' : '#f4f6fa';
+}
+function clearRoomUI14() {
+  S = null; ME = null; const b = $('#rank-toggle14'); if (b) b.textContent = '🏆 Рейтинг';
+  const net = $('#net'); if (net) net.textContent = ''; renderRank14(null);
 }
 function chrome14() {
   let tools = $('#global-tools14'); if (tools) return;
