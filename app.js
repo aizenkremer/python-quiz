@@ -43,6 +43,7 @@ function feedRead(tab) { if (!S) return; const k = 'pq_feed_' + S.code, F = SS.g
 
 // ---------- API ----------
 async function api(p, post) {
+  if(p.a === 'createRoom' && !p.questionIds) p = {...p, questionIds:store.get('pq_selected_questions') || [], quizName:store.get('pq_quiz_name') || ''};
   const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 25000);
   let r;
   try {
@@ -103,7 +104,7 @@ function stopPoll() { polling = null; clearTimeout(pollTimer); }
 let pollBusy = false;
 function applyState(r) {
   if (!r || r.same || (S && S.code === r.code && Number(r.v) < lastV)) return;
-  lastV = r.v; lastCv = r.cv || ''; clockOff = r.now - Date.now(); S = r;
+  lastV = r.v; lastCv = r.cv || ''; clockOff = r.now - Date.now(); roomQuestions15_(r); S = r;
   const ev = r.events || []; if (lastEv >= 0) onEvents(ev);
   lastEv = ev.length ? Math.max(lastEv, ...ev.map(e => e.id)) : Math.max(lastEv, 0); render();
 }
@@ -135,6 +136,7 @@ function kickedScreen(msg) {
 function home() {
   stopPoll(); render = () => {}; clearRoomUI14();
   if (!APPS_SCRIPT_URL || APPS_SCRIPT_URL.includes('PASTE')) { $('#app').innerHTML = '<div class="card err">Не настроен APPS_SCRIPT_URL в config.js</div>'; return; }
+  if (location.hash === '#editor') return editorHome15_();
   if (location.hash === '#teacher') return teacherHome();
   const saved = store.get('pq_student');
   if (saved) return studentStart(saved);
@@ -160,7 +162,7 @@ function wizard(step) {
       <button id="next">Далее →</button></div><p class="muted">Преподаватель? <a href="#teacher">Режим преподавателя</a></p>`,
     choice: `<div class="card"><h2>${esc(L.fio)}, что делаем?</h2><div class="choice">
       <button class="bigbtn" id="c-create">➕<br>Создать команду</button><button class="bigbtn" id="c-join">👥<br>Войти в команду</button><button class="bigbtn" id="c-solo">🧑‍💻<br>Играть соло</button></div>
-      <p class="muted">Соло: личный набор из 15 задач дня (команды: ~12–13 задач на человека), без выборов капитана.</p>${back('who')}</div>`,
+      <p class="muted">Стандартное соло: 15 задач. В наборе преподавателя количество определяется выбранными вопросами. Без выборов капитана.</p>${back('who')}</div>`,
     create: `<div class="card"><h2>Создать команду</h2>${roomInput}<label>Название команды*<input id="tname" maxlength="30" placeholder="Байтики"></label>
       ${back('choice')} <button id="go">Создать</button></div>`,
     solo: `<div class="card"><h2>Играть соло</h2>${roomInput}${back('choice')} <button id="go">Начать</button></div>`,
@@ -290,7 +292,7 @@ function renderStudent() {
   if (s.status !== 'running') { $('#mylist').innerHTML = ''; main._html = null; }
   if (s.status === 'closed') { main.innerHTML = board(s); return; }
   if (!t) return renderTeams(main, s);
-  if (t.solo && s.status !== 'running') { main.innerHTML = `<div class="card"><h3>🧑‍💻 Соло-режим</h3>Ваш личный набор: 15 задач. Ждём, когда преподаватель запустит решение задач…</div>`; return; }
+  if (t.solo && s.status !== 'running') { main.innerHTML = `<div class="card"><h3>🧑‍💻 Соло-режим</h3>Ваш личный набор: ${s.questionCount || 15} задач. Ждём, когда преподаватель запустит решение задач…</div>`; return; }
   if (s.status === 'lobby') { main.innerHTML = teamCard(s) + `<div class="card">Ждём, когда преподаватель откроет выборы капитана. <button class="sec" id="leave">Покинуть команду</button></div>`; $('#leave').onclick = e => act({ a: 'leaveTeam', code: ME.code, mid: ME.mid }, e.target); return; }
   if (s.status === 'election' && !t.captain) return renderVote(main, s);
   if (s.status === 'election') { main.innerHTML = teamCard(s) + `<div class="card">Капитан выбран! Ждём старта задач…</div>`; return; }
@@ -776,6 +778,7 @@ function setTheme14(theme) {
   const meta = document.querySelector('meta[name="theme-color"]'); if (meta) meta.content = theme === 'dark' ? '#090d15' : '#f4f6fa';
 }
 function clearRoomUI14() {
+  resetTaskBank15_(); if(location.hash !== '#editor') document.body.classList.remove('editor-mode15');
   S = null; ME = null; const b = $('#rank-toggle14'); if (b) b.textContent = '🏆 Рейтинг';
   const net = $('#net'); if (net) net.textContent = ''; renderRank14(null);
 }
@@ -900,4 +903,268 @@ tBlitz=function(s){
   return h+`<details class="card"><summary>Индивидуальные вопросы блица · ${b.questions.length}</summary>${b.questions.map(q=>`<div class="focus-row14"><span>${esc(q.fio)}</span><span>${esc(TASK[q.task]?.title || q.task)} · ${esc(q.task)}</span></div>`).join('')}</details>`;
 };
 document.addEventListener('click',e=>{if(e.target.closest?.('.rhelp'))setTimeout(()=>toast('Места — по рейтингу. Рейтинг: процент баллов за задачи + бонусы на участника (до +15) − штраф на участника. Каждые 3 решения с первой попытки: +1, максимум +5 за игру. Итог не ниже нуля.',4000),0);});
-chrome14();home();
+chrome14();
+
+// Pure parser shared by the browser editor and automated import checks.
+(function(root){
+  const kinds={mc:'mc','выбор':'mc','тест':'mc','варианты':'mc','число':'num',num:'num','текст':'text','короткий':'text',text:'text','свободный':'free','развернутый':'free','развёрнутый':'free',free:'free',code:'code','код':'code','порядок':'order',order:'order'};
+  const norm=s=>String(s??'').trim().toLowerCase().replace(/ё/g,'е');
+  function correctIndex(value,options){
+    const s=String(value??'').trim();if(/^[1-8]$/.test(s))return Number(s)-1;
+    const latin='ABCDEFGH',cyrillic='АБВГДЕЖЗ',u=s.toUpperCase().replace(/[).]$/,'');
+    if(u.length===1 && latin.includes(u))return latin.indexOf(u);
+    if(u.length===1 && cyrillic.includes(u))return cyrillic.indexOf(u);
+    const matches=options.map((x,i)=>norm(x)===norm(s)?i:-1).filter(i=>i>=0);
+    return matches.length===1?matches[0]:NaN;
+  }
+  function canonical(raw,alreadyCanonical=false){
+    const q={...raw};delete q._error;delete q._row;
+    q.question=String(q.question??q.desc??'').replace(/\r\n/g,'\n').trim();
+    q.title=String(q.title || q.question.replace(/\s+/g,' ').slice(0,80)).trim();
+    q.topic=String(q.topic || '').trim();q.id=String(q.id || '').trim();
+    const known=Object.prototype.hasOwnProperty.call(kinds,norm(q.kind));
+    if(String(q.kind || '').trim() && !known)throw Error('Неизвестный тип вопроса');
+    q.kind=(known?kinds[norm(q.kind)]:null) || (q.options?.length?'mc':String(q.answer??'').trim()?'text':'free');
+    q.active=q.active!==false && !['нет','false','0','выключен'].includes(norm(q.active));
+    q.options=Array.isArray(q.options)?Array.from(q.options,x=>String(x??'')):String(q.options || '').split('\n').filter(s=>s.trim());
+    q.pts=q.kind==='free'?0:Number(q.pts==null||q.pts===''?(q.kind==='code'?2:1):q.pts);
+    q.starter=String(q.starter || '');q.tests=String(q.tests || '');
+    if(!q.question)throw Error('Нет текста вопроса');if(q.question.length>5000)throw Error('Текст длиннее 5000 символов');
+    if(!Number.isInteger(q.pts)||q.pts<0||q.pts>10||(q.kind!=='free'&&q.pts<1))throw Error('Баллы: целое число от 1 до 10');
+    if(['mc','order'].includes(q.kind)){
+      if(q.options.length<2||q.options.length>8)throw Error('Нужно от 2 до 8 вариантов/строк');
+      if(q.options.some(x=>!x.trim()))throw Error('Есть пустой вариант');
+      if(q.kind==='mc'){
+        q.answer=alreadyCanonical?q.answer:correctIndex(q.answer,q.options);
+        if(!Number.isInteger(q.answer)||q.answer<0||q.answer>=q.options.length)throw Error('Правильный ответ: номер варианта от 1 до '+q.options.length);
+      }else{
+        const values=Array.isArray(q.answer)?q.answer:String(q.answer??'').split(/\n|;/).filter(x=>x.trim());
+        q.answer=values.map(v=>String(v).split(',').map(n=>Number(n.trim())-(alreadyCanonical?0:1)).join(','));
+        if(!q.answer.length || q.answer.some(v=>{const a=v.split(',').map(Number);return a.length!==q.options.length||new Set(a).size!==a.length||a.some(n=>!Number.isInteger(n)||n<0||n>=q.options.length);} ))throw Error('Укажите все номера строк по порядку, например 2,1,3');
+      }
+    }else if(q.kind==='code'){
+      if(!q.tests.trim())throw Error('Для Python нужны тесты');q.answer=null;
+    }else if(q.kind==='free'){q.answer=null;q.options=[];}
+    else{
+      q.answer=String(q.answer??'').trim();if(!q.answer)throw Error('Нет правильного ответа');
+      if(q.kind==='num'&&!Number.isFinite(Number(q.answer.replace(',','.'))))throw Error('Ожидается числовой ответ');q.options=[];
+    }
+    return q;
+  }
+  function csvRows(text){
+    text=String(text).replace(/^\uFEFF/,'');
+    const first=text.split(/\r?\n/,1)[0];
+    let delimiter=';',best=-1;for(const d of [';','\t',',']){let quote=false,n=0;for(let i=0;i<first.length;i++){if(first[i]==='"')quote=!quote;else if(!quote&&first[i]===d)n++;}if(n>best){best=n;delimiter=d;}}
+    const rows=[];let row=[],cell='',quoted=false,afterQuote=false;
+    for(let i=0;i<text.length;i++){
+      const c=text[i];
+      if(quoted){if(c==='"'&&text[i+1]==='"'){cell+='"';i++;}else if(c==='"'){quoted=false;afterQuote=true;}else cell+=c;continue;}
+      if(c==='"'&&!cell&&!afterQuote){quoted=true;continue;}
+      if(c===delimiter){row.push(cell);cell='';afterQuote=false;continue;}
+      if(c==='\n'||c==='\r'){if(c==='\r'&&text[i+1]==='\n')i++;row.push(cell);if(row.some(x=>x.trim()))rows.push(row);row=[];cell='';afterQuote=false;continue;}
+      if(afterQuote && c.trim())throw Error('Лишний символ после кавычек в CSV');
+      if(!afterQuote)cell+=c;
+    }
+    if(quoted)throw Error('В CSV не закрыты кавычки');row.push(cell);if(row.some(x=>x.trim()))rows.push(row);return rows;
+  }
+  const aliases={id:'id','версия':'revision',revision:'revision','тема':'topic',topic:'topic','тип':'kind',type:'kind',kind:'kind','вопрос':'question',question:'question','условие':'question','текствопроса':'question','название':'title',title:'title','ответ':'answer','правильныйответ':'answer',answer:'answer','баллы':'pts',points:'pts',pts:'pts','начальныйкод':'starter',starter:'starter','тесты':'tests',tests:'tests','активен':'active',active:'active'};
+  function fromRows(rows){
+    if(rows.length<2)throw Error('Нужна строка заголовков и хотя бы один вопрос');
+    const fields=rows[0].map(h=>{const n=norm(h).replace(/[\s_№.-]/g,'');return (Object.prototype.hasOwnProperty.call(aliases,n)?aliases[n]:null) || (/^(вариант|option)[1-8]$/.test(n)?'option'+n.match(/[1-8]$/)[0]:null);});
+    if(!fields.includes('question'))throw Error('Не найден столбец «Вопрос». Используйте шаблон CSV/Excel');
+    if(fields.filter(Boolean).length!==new Set(fields.filter(Boolean)).size)throw Error('Повторяются заголовки столбцов');
+    return rows.slice(1).filter(r=>r.some(x=>String(x).trim())).map((row,index)=>{
+      const q={options:[],_row:index+2};fields.forEach((f,i)=>{if(!f)return;if(f.startsWith('option'))q.options[Number(f.slice(6))-1]=String(row[i]??'');else q[f]=row[i]??'';});
+      while(q.options.length && !q.options[q.options.length-1]?.trim())q.options.pop();
+      return q;
+    });
+  }
+  function fromText(text){
+    const lines=String(text).replace(/^\uFEFF/,'').replace(/\r\n/g,'\n').split('\n'),result=[];let q=null,section='question',defaultTopic='';
+    function flush(){if(q){if(q.question.trim())result.push(q);q=null;}}
+    for(const source of lines){const line=source.trim();if(!line||/^[-=]{3,}$/.test(line))continue;
+      let m;
+      if((m=line.match(/^(?:вопрос(?:\s*\d+)?\s*[:.]|\d+[.]\s+)\s*(.*)$/i))){flush();q={question:m[1],topic:defaultTopic,options:[]};section='question';continue;}
+      if((m=line.match(/^тема\s*:\s*(.*)$/i))){if(q)q.topic=m[1];else defaultTopic=m[1];continue;}
+      if(!q)continue;
+      if((m=line.match(/^(?:правильный\s+ответ|ответ)\s*:\s*(.*)$/i))){q.answer=m[1];section='answer';continue;}
+      if((m=line.match(/^(тип|баллы|название)\s*:\s*(.*)$/i))){q[{'тип':'kind','баллы':'pts','название':'title'}[norm(m[1])]]=m[2];section='meta';continue;}
+      if((m=line.match(/^([A-HАБВГДЕЖЗ]|[1-8])[).]\s+(.+)$/i))){q.options.push(m[2]);section='option';continue;}
+      if(/^варианты\s*:?$/i.test(line)){section='option';continue;}
+      if(section==='question')q.question+='\n'+source;
+      else if(section==='option'&&q.options.length)q.options[q.options.length-1]+='\n'+source;
+      else if(section==='answer')q.answer+='\n'+source;
+    }
+    flush();if(!result.length)throw Error('Вопросы не найдены. Начните блок строкой «Вопрос: …». Для выбора добавьте варианты и «Ответ: 2».');return result;
+  }
+  function review(raw,alreadyCanonical=false){
+    if(!Array.isArray(raw)||!raw.length)throw Error('Файл не содержит вопросов');if(raw.length>50)throw Error('За один импорт — до 50 вопросов');
+    const ids=new Set();return raw.map((q,i)=>{try{const item=canonical(q,alreadyCanonical);if(item.id&&ids.has(item.id))throw Error('Повторяется ID '+item.id);if(item.id)ids.add(item.id);return {...item,_row:q._row || i+1};}catch(e){return {...q,_row:q._row || i+1,_error:e.message};}});
+  }
+  function answerDisplay(q){return q.kind==='mc'?String(Number(q.answer)+1):q.kind==='order'?(q.answer || []).map(v=>v.split(',').map(n=>Number(n)+1).join(',')).join('\n'):String(q.answer??'');}
+  const api={canonical,csvRows,fromRows,fromText,review,answerDisplay};root.QuizImport15=api;if(typeof module==='object'&&module.exports)module.exports=api;
+})(typeof globalThis!=='undefined'?globalThis:this);
+
+'use strict';
+let TASK_BANK15 = {}, TASK_SIGNATURE15 = '';
+const questionCount15=n=>n+' '+(n%10===1&&n%100!==11?'вопрос':n%10>=2&&n%10<=4&&(n%100<12||n%100>14)?'вопроса':'вопросов');
+function resetTaskBank15_(){Object.entries(TASK_BANK15).forEach(([id,old])=>{if(old)TASK[id]=old;else delete TASK[id];});TASK_BANK15={};TASK_SIGNATURE15='';}
+function roomQuestions15_(r){
+  const signature=r.code+'|'+(r.questions || []).map(q=>q.id+':'+(q.revision || '')).join(',');if(signature===TASK_SIGNATURE15)return;
+  resetTaskBank15_();TASK_SIGNATURE15=signature;
+  for(const q of r.questions || []){TASK_BANK15[q.id]=TASK[q.id];TASK[q.id]={...q,desc:'<div class="question-text15">'+esc(q.question)+'</div>'};}
+}
+function bankButton15_(){
+  let b=$('#bank-open15');if(!b){b=document.createElement('button');b.id='bank-open15';b.className='sec';b.textContent='✎ Вопросы';b.onclick=()=>{location.hash='#editor';};$('#global-tools14')?.appendChild(b);}
+  b.hidden=!['#teacher','#editor'].includes(location.hash);
+  const rank=$('#rank-toggle14');if(rank)rank.hidden=location.hash==='#editor';
+}
+let editorHome15_;
+(function(){
+  const P=QuizImport15;
+  let auth=null,records=[],baseAnswers={},selected=new Set(),draft=null,preview=[],previewEdit=-1,loaded=false,busy=false,page=0,search='',scope='all',topic='',kind='',quizName='';
+  const labels={mc:'Выбор ответа',num:'Число',text:'Короткий ответ',free:'Свободный ответ',code:'Python-код',order:'Порядок строк'};
+  const csvHeaders=['ID','Тема','Тип','Название','Вопрос','Вариант1','Вариант2','Вариант3','Вариант4','Вариант5','Вариант6','Вариант7','Вариант8','Ответ','Баллы','Начальный код','Тесты','Версия'];
+  const sample=[
+    {topic:'Циклы',kind:'mc',question:'Чему равно len(range(3))?',options:['1','2','3','4'],answer:2,pts:1},
+    {topic:'Циклы',kind:'num',question:'Сколько раз выполнится цикл for i in range(4)?',answer:'4',pts:1},
+    {topic:'Функции',kind:'text',question:'Какое ключевое слово объявляет функцию в Python?',answer:'def',pts:1},
+    {topic:'Циклы',kind:'free',question:'Объясните своими словами, когда удобнее for, а когда while.',answer:null,pts:0},
+    {topic:'Функции',kind:'code',question:'Напишите функцию double(n), возвращающую удвоенное число.',starter:'def double(n):\n    pass',tests:'assert double(2) == 4\nassert double(-1) == -2',answer:null,pts:2}
+  ];
+  function plain(html){const d=new DOMParser().parseFromString(String(html).replace(/<br\s*\/?\s*>/gi,'\n').replace(/<\/?pre[^>]*>/gi,'\n'),'text/html');return d.body.textContent.trim();}
+  function builtin(t){return {id:t.id,kind:t.kind,topic:t.sub || CAT[t.cat] || 'Python',title:t.title,question:plain(t.desc),options:t.options || [],answer:t.kind==='mc'?Number(baseAnswers[t.id]):t.kind==='order'?baseAnswers[t.id]:baseAnswers[t.id] ?? null,pts:t.kind==='free'?0:t.pts,starter:t.starter || '',tests:t.tests || '',active:true,revision:''};}
+  function items(){const map=new Map(BANK.map(t=>[t.id,builtin(t)]));for(const q of records)map.set(q.id,q);return [...map.values()];}
+  function message(text,error=false){const el=$('#editor-status15');if(el){el.textContent=text;el.className=error?'status15 error15':'status15';}}
+  function mounted(){return location.hash==='#editor' && !!$('#editor15');}
+  async function request(a,extra={}){return api({a,...auth,...extra},true);}
+  function merge(saved){for(const q of saved){const i=records.findIndex(x=>x.id===q.id);if(i<0)records.push(q);else records[i]=q;}}
+  function download(name,text,type='text/plain;charset=utf-8'){const url=URL.createObjectURL(new Blob([text],{type})),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+  function toRows(list){return [csvHeaders,...list.map(q=>[q.id || '',q.topic || '',q.kind,q.title || '',q.question,...Array.from({length:8},(_,i)=>q.options?.[i] || ''),P.answerDisplay(q),q.pts,q.starter || '',q.tests || '',q.revision || ''])];}
+  function newId(){return 'Q'+(crypto.randomUUID?crypto.randomUUID().replace(/-/g,''):Date.now().toString(36)+Math.random().toString(36).slice(2)).toUpperCase();}
+  function csv(list){return '\uFEFF'+toRows(list).map(row=>row.map(v=>'"'+String(v).replace(/"/g,'""')+'"').join(';')).join('\r\n');}
+  const scripts={};
+  function library(name,url){
+    if(window[name])return Promise.resolve(window[name]);if(scripts[name])return scripts[name];
+    scripts[name]=new Promise((resolve,reject)=>{const tag=document.createElement('script'),timer=setTimeout(()=>{tag.remove();delete scripts[name];reject(Error('Не удалось загрузить модуль импорта. Проверьте интернет или используйте TXT/CSV.'));},20000);tag.src=url;tag.onload=()=>{clearTimeout(timer);if(window[name])resolve(window[name]);else{delete scripts[name];reject(Error('Модуль импорта недоступен'));}};tag.onerror=()=>{clearTimeout(timer);delete scripts[name];tag.remove();reject(Error('Не удалось загрузить модуль импорта. Можно использовать TXT/CSV.'));};document.head.appendChild(tag);});return scripts[name];
+  }
+  async function templateXlsx(){const x=await library('XLSX','https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js');const book=x.utils.book_new();x.utils.book_append_sheet(book,x.utils.aoa_to_sheet(toRows(sample)),'Вопросы');x.writeFile(book,'Шаблон-вопросов.xlsx');}
+  const textSample='Тема: Циклы\n\nВопрос: Чему равно len(range(3))?\nТип: выбор\nА) 1\nБ) 2\nВ) 3\nГ) 4\nОтвет: В\nБаллы: 1\n\nВопрос: Сколько раз выполнится цикл for i in range(4)?\nТип: число\nОтвет: 4\nБаллы: 1\n\nВопрос: Объясните своими словами разницу между for и while.\nТип: свободный\nБаллы: 0\n';
+  async function importFile(file){
+    if(!file)return;if(file.size>3*1024*1024)throw Error('Файл должен быть не больше 3 МБ');
+    const ext=file.name.split('.').pop().toLowerCase();let raw,isCanonical=false;
+    if(ext==='xlsx'){
+      const x=await library('XLSX','https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js');
+      const wb=x.read(await file.arrayBuffer(),{type:'array',cellFormula:false,cellHTML:false});
+      if(!wb.SheetNames.length)throw Error('В книге нет листов');
+      raw=P.fromRows(x.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,defval:'',raw:false}));
+    }else if(ext==='docx'){
+      const m=await library('mammoth','https://cdn.jsdelivr.net/npm/mammoth@1.8.0/mammoth.browser.min.js');
+      const r=await m.extractRawText({arrayBuffer:await file.arrayBuffer()});if(r.value.length>200000)throw Error('В документе слишком много текста');raw=P.fromText(r.value);
+    }else if(['csv','tsv','txt','json'].includes(ext)){
+      const buffer=await file.arrayBuffer();let text=new TextDecoder('utf-8').decode(buffer);
+      if(text.includes('\uFFFD')&&ext!=='json')text=new TextDecoder('windows-1251').decode(buffer);
+      if(text.length>350000)throw Error('Слишком много текста для одного импорта');
+      if(ext==='json'){const j=JSON.parse(text);raw=Array.isArray(j)?j:j.questions;isCanonical=true;}
+      else if(ext==='csv'||ext==='tsv')raw=P.fromRows(P.csvRows(text));else raw=P.fromText(text);
+    }else throw Error('Поддерживаются DOCX, XLSX, CSV, TSV, TXT и JSON. Старый DOC сохраните как DOCX.');
+    preview=P.review(raw,isCanonical);previewEdit=-1;renderPreview();message('Распознано вопросов: '+preview.length+'. Проверьте ответы перед сохранением.');
+  }
+  function renderPreview(){
+    const el=$('#import-preview15');if(!el)return;
+    const errors=preview.filter(q=>q._error).length;
+    el.innerHTML=preview.length?`<div class="preview-title15"><h3>Проверка импорта · ${preview.length}</h3><button class="sec" id="discard-import15">Отменить импорт</button></div><p class="${errors?'error15':'muted'}">${errors?'Есть ошибок: '+errors+'. Исправьте их перед сохранением.':'Все строки прошли проверку. При сохранении вопросы будут добавлены в личный банк.'}</p>${preview.map((q,i)=>`<article class="preview-row15 ${q._error?'invalid15':''}"><div><b>${i+1}. ${esc(q.title || q.question || 'Без вопроса')}</b><p>${q._error?'<span class="error15">Строка '+q._row+': '+esc(q._error)+'</span>':`${esc(labels[q.kind])} · ${q.pts} б. · ответ: <strong>${esc(q.kind==='free'?'ручная проверка':q.kind==='code'?'Python-тесты':P.answerDisplay(q))}</strong>`}</p></div><button class="sec" data-edit-preview15="${i}">Править</button><button class="sec" data-drop-preview15="${i}" aria-label="Убрать вопрос ${i+1} из импорта">✕</button></article>`).join('')}<button id="save-import15" ${errors||busy?'disabled':''}>Сохранить ${questionCount15(preview.length)} в банк</button>`:'';
+    $('#discard-import15')?.addEventListener('click',()=>{preview=[];previewEdit=-1;renderPreview();});
+    el.querySelectorAll('[data-edit-preview15]').forEach(b=>b.onclick=()=>{previewEdit=Number(b.dataset.editPreview15);const q=preview[previewEdit];draft={...q};renderForm();$('#question-form15').scrollIntoView({behavior:'smooth',block:'start'});});
+    el.querySelectorAll('[data-drop-preview15]').forEach(b=>b.onclick=()=>{preview.splice(Number(b.dataset.dropPreview15),1);previewEdit=-1;renderPreview();});
+    const save=$('#save-import15');if(save)save.onclick=async()=>{
+      if(busy)return;if(!await askConfirm('Сохранить '+questionCount15(preview.length)+' в ваш банк? Существующие вопросы с такими ID будут обновлены; начатые игры не изменятся.'))return;
+      preview=preview.map(q=>({...q,id:q.id || newId()}));busy=true;save.disabled=true;message('Сохраняем вопросы…');
+      try{const result=await request('bankSave',{questions:preview.map(({_row,_error,...q})=>q)});if(!mounted())return;merge(result.items);result.items.forEach(q=>{if(q.active&&selected.size<50)selected.add(q.id);});preview=[];previewEdit=-1;renderPreview();renderList();renderSelection();message('Сохранено: '+result.items.length+'. Выберите «Использовать набор» для новой игры.');}
+      catch(e){message(e.message,true);}finally{busy=false;renderPreview();}
+    };
+  }
+  function renderSelection(){
+    const el=$('#selection-count15');if(el)el.textContent=selected.size+' / 50 вопросов';
+    const apply=$('#use-set15');if(apply)apply.disabled=!selected.size;
+  }
+  function renderList(){
+    const el=$('#question-list15');if(!el)return;
+    let all=items(),filtered=all.filter(q=>(scope==='all'||(scope==='mine'?!!q.revision:!q.active))&&(!topic||q.topic===topic)&&(!kind||q.kind===kind)&&(!search||normSearch(q).includes(search.toLowerCase())));
+    const pages=Math.max(1,Math.ceil(filtered.length/30));page=Math.min(page,pages-1);const show=filtered.slice(page*30,(page+1)*30);
+    el.innerHTML=`<div class="list-heading15"><b>Найдено: ${filtered.length}</b><span class="muted">Страница ${page+1}/${pages}</span></div>${show.map(q=>`<article class="question-row15 ${q.active?'':'inactive15'}"><input type="checkbox" aria-label="Выбрать ${esc(q.title)}" data-select15="${esc(q.id)}" ${selected.has(q.id)?'checked':''} ${!q.active?'disabled':''}><div><b>${esc(q.title)}</b><p>${esc(q.topic)} · ${esc(labels[q.kind])} · ${q.pts} б. ${q.revision?'· мой банк':''} ${!q.active?'· выключен':''}</p><small>${esc(q.question.replace(/\s+/g,' ').slice(0,140))}</small></div><button class="sec" data-edit15="${esc(q.id)}">Править</button></article>`).join('')||'<p class="muted">По этому фильтру вопросов нет.</p>'}<div class="pagination15"><button class="sec" id="prev15" ${page?'':'disabled'}>← Назад</button><button class="sec" id="next15" ${page<pages-1?'':'disabled'}>Далее →</button></div>`;
+    el.querySelectorAll('[data-select15]').forEach(b=>b.onchange=()=>{if(b.checked&&selected.size>=50){b.checked=false;return message('Для одной игры можно выбрать до 50 вопросов',true);}if(b.checked)selected.add(b.dataset.select15);else selected.delete(b.dataset.select15);renderSelection();});
+    el.querySelectorAll('[data-edit15]').forEach(b=>b.onclick=()=>{draft={...all.find(q=>q.id===b.dataset.edit15)};previewEdit=-1;renderForm();$('#question-form15').scrollIntoView({behavior:'smooth',block:'start'});});
+    $('#prev15').onclick=()=>{page--;renderList();};$('#next15').onclick=()=>{page++;renderList();};
+    const topicSelect=$('#filter-topic15');if(topicSelect){const topics=[...new Set(all.map(q=>q.topic).filter(Boolean))].sort();topicSelect.innerHTML='<option value="">Все темы</option>'+topics.map(t=>`<option ${t===topic?'selected':''}>${esc(t)}</option>`).join('');}
+  }
+  function normSearch(q){return (q.id+' '+q.title+' '+q.topic+' '+q.question).toLowerCase();}
+  function field(name,label,value,area=false,extra=''){return `<label>${label}${area?`<textarea id="q-${name}15" ${extra}>${esc(value)}</textarea>`:`<input id="q-${name}15" value="${esc(value)}" ${extra}>`}</label>`;}
+  function renderForm(){
+    const el=$('#question-form15');if(!el)return;
+    const q=draft || {kind:'mc',title:'',question:'',topic:'',options:['',''],answer:0,pts:1,active:true};
+    const answer=q._error?String(q.answer??''):P.answerDisplay(q);
+    el.innerHTML=`<div class="form-heading15"><h2>${previewEdit>=0?'Правка импорта':q.id?'Редактирование вопроса':'Новый вопрос'}</h2><span class="muted">${esc(q.id || 'ID присвоится при сохранении')}</span></div><form id="q-form15">${field('topic','Тема',q.topic || '',false,'maxlength="80"')}${field('title','Короткое название',q.title || '',false,'maxlength="120"')}<label>Тип задания<select id="q-kind15">${Object.entries(labels).map(([k,v])=>`<option value="${k}" ${q.kind===k?'selected':''}>${esc(v)}</option>`).join('')}</select></label>${field('question','Формулировка вопроса',q.question || '',true,'rows="6" maxlength="5000" required')}<div id="q-options-wrap15">${field('options','Варианты / строки — каждый с новой строки',(q.options || []).join('\n'),true,'rows="5"')}<p class="muted">Для выбора ответа: от 2 до 8 вариантов. Для порядка: строки программы.</p></div><div id="q-answer-wrap15">${field('answer','Правильный ответ',answer,true,'rows="2"')}<p class="muted" id="answer-help15"></p></div><div id="q-code-wrap15">${field('starter','Начальный код',q.starter || '',true,'rows="5" maxlength="4000"')}${field('tests','Python-тесты (assert …)',q.tests || '',true,'rows="5" maxlength="5000"')}</div>${field('pts','Баллы',q.pts ?? 1,false,'type="number" min="0" max="10" step="1"')}<label class="check15"><input type="checkbox" id="q-active15" ${q.active!==false?'checked':''}> Доступен для новых игр</label><p class="muted">Сохранение не меняет уже созданные комнаты.</p><p id="form-error15" class="error15" role="alert"></p><div class="form-buttons15"><button type="submit" id="q-save15">${previewEdit>=0?'Применить к предпросмотру':'Сохранить вопрос'}</button><button type="button" class="sec" id="new-question15">Новый вопрос</button></div></form>`;
+    const updateType=()=>{const k=$('#q-kind15').value;$('#q-options-wrap15').hidden=!['mc','order'].includes(k);$('#q-answer-wrap15').hidden=['free','code'].includes(k);$('#q-code-wrap15').hidden=k!=='code';$('#q-pts15').disabled=k==='free';if(k==='free')$('#q-pts15').value=0;else if(Number($('#q-pts15').value)===0)$('#q-pts15').value=k==='code'?2:1;$('#answer-help15').textContent=k==='mc'?'Номер правильного варианта, начиная с 1.':k==='order'?'Номера строк в правильном порядке, например 2,1,3.':k==='num'?'Число, например 12 или 3,5.':'Короткий точный ответ. Регистр и лишние пробелы не учитываются.';};
+    $('#q-kind15').onchange=updateType;updateType();
+    $('#new-question15').onclick=()=>{draft=null;previewEdit=-1;renderForm();};
+    $('#q-form15').onsubmit=async e=>{
+      e.preventDefault();if(busy)return;let next;
+      try{next=P.canonical({id:q.id || '',revision:q.revision || '',topic:$('#q-topic15').value,title:$('#q-title15').value,kind:$('#q-kind15').value,question:$('#q-question15').value,options:$('#q-options15').value.split('\n').filter(x=>x.trim()),answer:$('#q-answer15').value,pts:$('#q-pts15').value,starter:$('#q-starter15').value,tests:$('#q-tests15').value,active:$('#q-active15').checked});}
+      catch(err){$('#form-error15').textContent=err.message;return;}
+      if(previewEdit>=0){preview[previewEdit]={...next,_row:preview[previewEdit]._row};previewEdit=-1;draft=null;renderPreview();renderForm();message('Строка исправлена. Сохраните импорт после проверки всех вопросов.');return;}
+      if(!next.id){next.id=newId();q.id=next.id;}draft={...next};busy=true;$('#q-save15').disabled=true;
+      try{const r=await request('bankSave',{questions:[next]});if(!mounted())return;merge(r.items);draft={...r.items[0]};if(!draft.active)selected.delete(draft.id);renderList();renderSelection();renderForm();message('Вопрос сохранён в вашей таблице.');}
+      catch(err){if($('#form-error15'))$('#form-error15').textContent=err.message;}finally{busy=false;if($('#q-save15'))$('#q-save15').disabled=false;}
+    };
+  }
+  function renderEditor(){
+    if(!mounted())return;
+    $('#editor-body15').innerHTML=`<section class="editor-tools15"><div><h2>Подготовьте вопросы к занятию</h2><p class="muted">Изменяйте стандартные вопросы или создавайте свои. Правильные ответы доступны только преподавателю.</p></div><div class="editor-actions15"><button id="add-question15">＋ Новый вопрос</button><button class="sec" id="refresh-bank15">Обновить банк</button></div></section><details class="card import15" open><summary><b>Импорт из документа или таблицы</b></summary><p>Word (.docx), Excel (.xlsx, первый лист), CSV, TXT или JSON. Сначала распознавание и проверка, затем сохранение.</p><div class="editor-actions15"><label class="file-label15">Выбрать файл<input id="import-file15" type="file" accept=".docx,.xlsx,.csv,.tsv,.txt,.json"></label><button class="sec" id="template-txt15">Шаблон для Word / TXT</button><button class="sec" id="template-csv15">Шаблон CSV</button><button class="sec" id="template-xlsx15">Шаблон Excel</button></div><p class="muted">Для Word используйте блоки «Вопрос: …», варианты «А) …», «Ответ: В». Обычный текст лекции без вопросов автоматически в тест не превращается. Файл разбирается в браузере; сохраняются только проверенные вопросы.</p><details><summary>Или вставить текст вопросов</summary><textarea id="import-text15" rows="7" placeholder="Вопрос: …&#10;А) …&#10;Б) …&#10;Ответ: 2"></textarea><button class="sec" id="parse-text15">Проверить текст</button></details><div id="import-preview15"></div></details><section class="selection15 card"><div><b>Набор для новой игры</b><p id="selection-count15"></p></div><label>Название набора<input id="quiz-name15" maxlength="80" value="${esc(quizName)}" placeholder="Например: Циклы — закрепление"></label><div class="editor-actions15"><button id="use-set15">Использовать набор</button><button class="sec" id="clear-set15">Снять выбор</button><button class="sec" id="export-json15">Экспорт выбранных JSON</button><button class="sec" id="export-csv15">Экспорт выбранных CSV</button></div><p class="muted">От 1 до 50 вопросов. Все команды получат этот набор целиком. Для стандартной случайной игры снимите выбор.</p></section><div class="editor-grid15"><section class="card"><div class="editor-filters15"><input id="search-questions15" type="search" placeholder="Поиск по тексту, названию или ID" aria-label="Поиск вопросов"><select id="filter-scope15" aria-label="Источник вопросов"><option value="all">Все вопросы</option><option value="mine">Новые и изменённые</option><option value="off">Выключенные</option></select><select id="filter-topic15" aria-label="Тема вопросов"></select><select id="filter-kind15" aria-label="Тип вопросов"><option value="">Все типы</option>${Object.entries(labels).map(([k,v])=>`<option value="${k}">${esc(v)}</option>`).join('')}</select></div><div id="question-list15"></div></section><section class="card" id="question-form15"></section></div>`;
+    $('#add-question15').onclick=()=>{draft=null;previewEdit=-1;renderForm();$('#question-form15').scrollIntoView({behavior:'smooth'});};
+    $('#refresh-bank15').onclick=()=>load(true);
+    $('#import-file15').onchange=async e=>{message('Читаем файл…');try{await importFile(e.target.files[0]);}catch(err){message(err.message,true);}finally{e.target.value='';}};
+    $('#parse-text15').onclick=()=>{try{preview=P.review(P.fromText($('#import-text15').value));previewEdit=-1;renderPreview();message('Проверьте распознанные вопросы и ответы.');}catch(e){message(e.message,true);}};
+    $('#template-txt15').onclick=()=>download('Шаблон-вопросов.txt',textSample);$('#template-csv15').onclick=()=>download('Шаблон-вопросов.csv',csv(sample),'text/csv;charset=utf-8');$('#template-xlsx15').onclick=()=>templateXlsx().catch(e=>message(e.message,true));
+    $('#search-questions15').value=search;$('#filter-scope15').value=scope;$('#filter-kind15').value=kind;
+    $('#search-questions15').oninput=e=>{search=e.target.value;page=0;renderList();};
+    $('#filter-scope15').onchange=e=>{scope=e.target.value;page=0;renderList();};$('#filter-kind15').onchange=e=>{kind=e.target.value;page=0;renderList();};$('#filter-topic15').onchange=e=>{topic=e.target.value;page=0;renderList();};
+    $('#clear-set15').onclick=()=>{selected.clear();store.del('pq_selected_questions');store.del('pq_quiz_name');renderList();renderSelection();};
+    $('#use-set15').onclick=()=>{const active=new Set(items().filter(q=>q.active).map(q=>q.id));const ids=[...selected].filter(id=>active.has(id));if(!ids.length)return message('Выберите хотя бы один активный вопрос',true);store.set('pq_selected_questions',ids);store.set('pq_quiz_name',$('#quiz-name15').value.trim() || 'Набор преподавателя');location.hash='#teacher';};
+    const exportSet=()=>{const set=items().filter(q=>selected.has(q.id));if(!set.length)throw Error('Сначала выберите вопросы');return set;};
+    $('#export-json15').onclick=()=>{try{download('Вопросы.json',JSON.stringify({format:'python-quiz-v15',questions:exportSet()},null,2),'application/json');}catch(e){message(e.message,true);}};
+    $('#export-csv15').onclick=()=>{try{download('Вопросы.csv',csv(exportSet()),'text/csv;charset=utf-8');}catch(e){message(e.message,true);}};
+    renderList();renderSelection();renderForm();renderPreview();
+  }
+  async function load(refresh=false){
+    if(!mounted())return;message('Загружаем банк…');
+    try{const r=await request('bankList');if(!mounted())return;records=r.items;baseAnswers=r.baseAnswers;loaded=true;const active=new Set(items().filter(q=>q.active).map(q=>q.id));selected=new Set([...selected].filter(id=>active.has(id)));if(refresh){preview=[];draft=null;previewEdit=-1;}renderEditor();message('Банк загружен: '+items().length+' вопросов. Личных и изменённых: '+records.length+'.');}
+    catch(e){if(!mounted())return;message(e.message,true);auth=null;$('#editor-body15').innerHTML=authForm();bindAuth();}
+  }
+  function authForm(){return '<form id="editor-auth15" class="card editor-auth15"><h2>Вход для преподавателя</h2><p>Используйте тот же пароль, что и при создании комнаты.</p><label>Пароль преподавателя<input type="password" id="editor-pw15" autocomplete="current-password" required></label><button type="submit">Открыть банк вопросов</button></form>';}
+  function bindAuth(){$('#editor-auth15').onsubmit=e=>{e.preventDefault();auth={pw:$('#editor-pw15').value};$('#editor-pw15').value='';load();};}
+  editorHome15_=function(){
+    document.body.classList.remove('student','tv-open');document.body.classList.add('editor-mode15');bankButton15_();
+    selected=new Set(store.get('pq_selected_questions') || []);quizName=store.get('pq_quiz_name') || '';search='';topic='';kind='';page=0;draft=null;preview=[];previewEdit=-1;
+    $('#app').innerHTML='<div id="editor15"><div class="editor-head15"><div><span class="eyebrow14">КАБИНЕТ ПРЕПОДАВАТЕЛЯ</span><h1>Редактор вопросов</h1></div><a class="back15" href="#teacher">← К игре</a></div><div id="editor-status15" class="status15" role="status" aria-live="polite"></div><div id="editor-body15"></div></div>';
+    const saved=store.get('pq_teacher');auth=saved?{code:saved.code,key:saved.key}:null;
+    if(auth)load();else{$('#editor-body15').innerHTML=authForm();bindAuth();}
+  };
+  document.addEventListener('visibilitychange',()=>{if(document.hidden&&location.hash==='#editor')return;});
+  window.addEventListener('hashchange',()=>{if(location.hash!=='#editor'){auth=null;records=[];baseAnswers={};preview=[];draft=null;loaded=false;document.body.classList.remove('editor-mode15');}bankButton15_();});
+})();
+const homeTeacher15_=teacherHome;
+teacherHome=function(){
+  homeTeacher15_();bankButton15_();
+  if($('#create')){
+    const box=document.createElement('div');box.className='quiz-choice15';
+    const ids=store.get('pq_selected_questions') || [];
+    box.innerHTML=`<b>${ids.length?'Набор: '+esc(store.get('pq_quiz_name') || 'Мои вопросы')+' · '+questionCount15(ids.length):'Стандартный случайный набор'}</b><p><a href="#editor">✎ Редактор вопросов и импорт документа</a></p>${ids.length?'<button type="button" class="sec" id="default-set15">Вернуть стандартную игру</button>':''}`;
+    $('#create').before(box);$('#default-set15')?.addEventListener('click',()=>{store.del('pq_selected_questions');store.del('pq_quiz_name');teacherHome();});
+  }
+};
+const renderTeacherBefore15_=renderTeacher;
+renderTeacher=function(T){renderTeacherBefore15_(T);bankButton15_();if(S?.quizName){const banner=document.createElement('div');banner.className='card';banner.innerHTML='<b>Набор: '+esc(S.quizName)+'</b> · '+questionCount15(S.poolSize);$('#app').prepend(banner);}};
+const renderStudentBefore15_=renderStudent;
+renderStudent=function(){renderStudentBefore15_();bankButton15_();};
+home();bankButton15_();
