@@ -400,7 +400,7 @@ const withPasteNote = (src, tid) => { const v = pc(tid).v; return v.p || v.b ? s
 
 // ---------- задачи ----------
 let taskCards = {};
-const ST = { skipped: 'нет ответа · 0 б.', assigned: 'в работе', solved: 'решена ✔', failed: 'не решена ✘', review: 'на проверке 📝' };
+const ST = { skipped: 'провалена ✘ · пропуск', assigned: 'в работе', solved: 'решена ✔', failed: 'не решена ✘', review: 'на проверке 📝' };
 const CLOSED = x => x && ['solved', 'failed', 'review', 'skipped'].includes(x.st);
 function renderRunning(main, s) {
   const t = s.team, isCap = t.captain === ME.mid && !t.solo, name = mid => (t.members.find(m => m.mid === mid) || {}).fio || '—';
@@ -430,8 +430,8 @@ function renderRunning(main, s) {
   // список своих задач: открытые сверху, закрытые ниже
   const open = mine.filter(id => !CLOSED(t.tasks[id])), closed = mine.filter(id => CLOSED(t.tasks[id]));
   const cnt = { solved: 0, failed: 0, review: 0, skipped: 0 }; closed.forEach(id => cnt[t.tasks[id].st]++);
-  const li = id => { const x = t.tasks[id], tk = TASK[id]; return `<button class="tcard st-b-${x.st}" data-open="${id}"><span class="tc-top"><span class="pill ${tk.cat}">${catLabel(tk)}</span><span class="tc-st st-${x.st}">${taskCards[id].el.querySelector('.newb') ? '<span class="newb">НОВАЯ</span>' : ''}${ST[x.st] || ''}</span></span><span class="tc-t">${esc(tk.title)}</span><span class="muted">${x.st === 'skipped' ? 0 : tk.pts} б.${x.att ? ' · попыток: ' + x.att : ''}</span></button>`; };
-  const lh = `<h2 class="lh">Мои задачи <span class="muted">${open.length} открыто · ✅ ${cnt.solved} · ❌ ${cnt.failed} · — ${cnt.skipped}${cnt.review ? ' · 📝 ' + cnt.review : ''}</span></h2>
+  const li = id => { const x = t.tasks[id], tk = TASK[id]; return `<button class="tcard st-b-${x.st === 'skipped' ? 'failed' : x.st}" data-open="${id}"><span class="tc-top"><span class="pill ${tk.cat}">${catLabel(tk)}</span><span class="tc-st st-${x.st === 'skipped' ? 'failed' : x.st}">${taskCards[id].el.querySelector('.newb') ? '<span class="newb">НОВАЯ</span>' : ''}${ST[x.st] || ''}</span></span><span class="tc-t">${esc(tk.title)}</span><span class="muted">${x.st === 'skipped' ? 0 : tk.pts} б.${x.att ? ' · попыток: ' + x.att : ''}</span></button>`; };
+  const lh = `<h2 class="lh">Мои задачи <span class="muted">${open.length} открыто · ✅ ${cnt.solved} · ❌ ${cnt.failed + cnt.skipped}${cnt.review ? ' · 📝 ' + cnt.review : ''}</span></h2>
     ${open.map(li).join('') || (closed.length ? '<div class="card muted">Все ваши задачи закрыты 🎉</div>' : `<div class="card muted" id="notasks">${t.solo ? '' : 'Капитан ещё не назначил вам задачи.'}</div>`)}
     ${closed.length ? `<h3 class="lh2">Закрытые</h3>${closed.map(li).join('')}` : ''}`;
   const ml = $('#mylist'); if (ml._h !== lh) { ml.innerHTML = lh; ml._h = lh; ml.querySelectorAll('[data-open]').forEach(b => b.onclick = () => openTask(b.dataset.open)); }
@@ -519,7 +519,7 @@ function makeCard(tk, box) {
 }
 function updateCard(c, x) {
   const done = CLOSED(x);
-  c.el.querySelector('.res').innerHTML = done ? `<p class="st-${x.st}">${x.st === 'solved' ? '✔ Задача решена! +' + c.tk.pts + ' б.' : x.st === 'review' ? '📝 На проверке у преподавателя' : x.st === 'skipped' ? '— Нет ответа: 0 баллов' : '✘ Попытки закончились — передайте задание или завершите за 0'}</p>` : (x.att ? `<p class="muted">Попыток использовано: ${x.att}</p>` : '');
+  c.el.querySelector('.res').innerHTML = done ? `<p class="st-${x.st === 'skipped' ? 'failed' : x.st}">${x.st === 'solved' ? '✔ Задача решена! +' + c.tk.pts + ' б.' : x.st === 'review' ? '📝 На проверке у преподавателя' : x.st === 'skipped' ? '✘ Задание провалено: пропуск, 0 баллов' : '✘ Попытки закончились — передайте задание или завершите за 0'}</p>` : (x.att ? `<p class="muted">Попыток использовано: ${x.att}</p>` : '');
   const a = c.ans(), sub = c.el.querySelector('.sub');
   const sh = done && a && c.tk.kind !== 'code' ? `<div class="myans"><b>Ваш ответ:</b> ${Array.isArray(a) ? a.map(esc).join('<br>') : esc(a)}</div>` : !done && Array.isArray(a) && a.length ? `<div class="myans muted">Было: ${a.map(esc).join('; ')}</div>` : '';
   if (sub._h !== sh) { sub.innerHTML = sh; sub._h = sh; }
@@ -835,7 +835,7 @@ function renderTaskTools(s) {
   const id=openTid,x=s.team.tasks[id]; if(!x) return;
   const can=s.status==='running' && x.to===ME.mid && !['solved','review','skipped'].includes(x.st);
   const peers=s.team.members.filter(m=>m.mid!==ME.mid);
-  const h=can?`<div class="card task-tools14"><h3>Застряли на задании?</h3>${peers.length && !x.transfers?`<label>Передать сокоманднику<select id="transfer-to14"><option value="">Выберите участника</option>${peers.map(m=>`<option value="${esc(m.mid)}">${esc(m.fio)}</option>`).join('')}</select></label><button class="sec" id="transfer14">Передать задание</button><p class="muted">Одна передача на задание. История попыток сохраняется.</p>`:x.transfers?'<p class="muted">Задание уже передано вам. Можно решить его или завершить за 0.</p>':''}<button class="sec" id="skip14">Нет ответа — завершить за 0</button></div>`:'';
+  const h=can?`<div class="card task-tools14"><h3>Застряли на задании?</h3>${peers.length && !x.transfers?`<label>Передать сокоманднику<select id="transfer-to14"><option value="">Выберите участника</option>${peers.map(m=>`<option value="${esc(m.mid)}">${esc(m.fio)}</option>`).join('')}</select></label><button class="sec" id="transfer14">Передать задание</button><p class="muted">Одна передача на задание. История попыток сохраняется.</p>`:x.transfers?'<p class="muted">Задание уже передано вам. Можно решить его или завершить за 0.</p>':''}<button class="sec" id="skip14">Пропустить — провал, 0 баллов</button></div>`:'';
   if(el._h===h)return; el._h=h; el.innerHTML=h;
   const transfer=$('#transfer14'); if(transfer)transfer.onclick=async()=>{
     const to=$('#transfer-to14').value; if(!to)return toast('Выберите сокомандника');
@@ -843,8 +843,8 @@ function renderTaskTools(s) {
     try{await act({a:'transfer',code:ME.code,mid:ME.mid,task:id,to},transfer);closeTask();toast('Задание передано');}catch(e){}
   };
   const skip=$('#skip14'); if(skip)skip.onclick=async()=>{
-    if(!await askConfirm('Завершить задание без ответа за 0 баллов? Вернуть его в работу будет нельзя.'))return;
-    try{await act({a:'skip',code:ME.code,mid:ME.mid,task:id},skip);toast('Задание завершено без ответа');}catch(e){}
+    if(!await askConfirm('Пропустить задание? Оно будет засчитано как проваленное: 0 баллов, серия прервётся. Вернуть его в работу будет нельзя.'))return;
+    try{await act({a:'skip',code:ME.code,mid:ME.mid,task:id},skip);toast('Задание засчитано как проваленное: пропуск, 0 баллов');}catch(e){}
   };
 }
 function renderFocus14(s) {
