@@ -2,7 +2,7 @@
 const POLL_MS = 2000;
 const CAT = { code: 'Python', fun: 'Python-игра', prog: 'Python без кода', logic: 'Логика', arch: 'Архитектура ЭВМ', math: 'Математика', free: 'Свободный ответ' };
 const catLabel = tk => tk.kind === 'code' && tk.cat !== 'fun' ? '⌨️ Код' : tk.cat === 'prog' ? '🧩 ' + tk.sub : tk.cat === 'fun' ? '🎮 ' + tk.sub + (tk.kind === 'code' ? ' ⌨️' : '') : tk.cat === 'free' ? '📝 ' + CAT.free : CAT[tk.cat] || '';
-const RATING_HELP = 'Как считается рейтинг: Рейтинг % = баллы ÷ максимум баллов своего пула × 100 + бонус. Пул зависит от числа людей (~12–13 задач на человека: соло 15, двое 25, трое 38, четверо 50), поэтому нагрузка равная. Бонус: каждое «первым решил» и очки блица = +1 п.п. на человека (сумма бонусов ÷ участников), максимум +15. Место финиша: сначала доля закрытых задач, при равенстве — время.';
+const RATING_HELP = 'Места определяются по рейтингу. Рейтинг = процент баллов за задачи + бонусы на участника (до +15) − штраф на участника. Серия: +1 за каждые 3 решения с первой попытки, максимум +5. Итог не ниже нуля. Время финиша показывается отдельно.';
 const rHelp = () => `<span class="rhelp" title="${RATING_HELP}">ⓘ Как считается рейтинг</span>`;
 const STATUS = { lobby: 'Сбор команд', election: 'Выборы капитанов', running: 'Решение задач', closed: 'Завершено' };
 const TASK = Object.fromEntries(BANK.map(t => [t.id, t]));
@@ -43,54 +43,84 @@ function feedRead(tab) { if (!S) return; const k = 'pq_feed_' + S.code, F = SS.g
 
 // ---------- API ----------
 async function api(p, post) {
+  const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 25000);
   let r;
-  if (post) r = await fetch(APPS_SCRIPT_URL, { method: 'POST', body: JSON.stringify(p) }); // text/plain → без preflight
-  else r = await fetch(APPS_SCRIPT_URL + '?' + new URLSearchParams(p));
+  try {
+  if (post) r = await fetch(APPS_SCRIPT_URL, { method: 'POST', body: JSON.stringify(p), signal: controller.signal }); // text/plain → без preflight
+  else r = await fetch(APPS_SCRIPT_URL + '?' + new URLSearchParams(p), { signal: controller.signal });
   const j = await r.json();
   if (!j.ok) throw new Error(j.error || 'Ошибка сервера');
   return j;
+  } finally { clearTimeout(timeout); }
 }
 async function act(p, btn) {
   if (btn) btn.disabled = true;
-  try { const r = await api(p, true); pollNow(); return r; }
+  try { const r = await api({ ...p, withState: true }, true); if (r.state) applyState(r.state); else pollNow(); return r; }
   catch (e) { toast('⚠ ' + e.message); throw e; }
   finally { if (btn) btn.disabled = false; }
 }
 
 // ---------- Python в Web Worker (можно прервать бесконечный цикл) ----------
-let worker = null, wReady = false, wSeq = 0; const wWait = {};
+let worker = null, wReady = false, wSeq = 0, workerReady = null, pyQueue = Promise.resolve();
+const wWait = new Map();
+function stopWorker(message) {
+  if (worker) worker.terminate(); worker = null; wReady = false; workerReady = null;
+  for (const done of wWait.values()) done({ out: '', ok: false, msg: message });
+  wWait.clear();
+}
 function newWorker() {
-  worker = new Worker('pyworker.js?v=13'); wReady = false;
-  worker.onmessage = e => { if (e.data.ready) { wReady = true; return; } const cb = wWait[e.data.id]; if (cb) { delete wWait[e.data.id]; cb(e.data); } };
+  if (workerReady) return workerReady;
+  workerReady = new Promise((resolve, reject) => {
+    const w = new Worker('pyworker.js?v=14'); worker = w;
+    const timer = setTimeout(() => { reject(new Error('Python не загрузился за 45 секунд. Проверьте интернет и повторите.')); stopWorker('Python не загружен'); }, 45000);
+    w.onerror = () => { clearTimeout(timer); reject(new Error('Не удалось загрузить Python. Повторите проверку.')); stopWorker('Ошибка загрузки Python'); };
+    w.onmessage = e => {
+      if (e.data.ready) { clearTimeout(timer); wReady = true; resolve(); return; }
+      if (e.data.error) { clearTimeout(timer); reject(new Error(e.data.error)); stopWorker(e.data.error); return; }
+      const done = wWait.get(e.data.id); if (done) { wWait.delete(e.data.id); done(e.data); }
+    };
+  });
+  return workerReady;
 }
 const caseStrict = tk => /upper|lower|capitalize|title|регистр|заглав|строчн|прописн/i.test((tk.desc || '') + (tk.tests || ''));
 function runPy(code, tests, ci = true) {
-  if (!worker) newWorker();
-  return new Promise(res => {
-    const id = ++wSeq; let timer = null;
-    const arm = () => { timer = setTimeout(() => { delete wWait[id]; worker.terminate(); worker = null; res({ out: '', ok: false, msg: '⏱ Превышено время выполнения (8 с). Возможно, бесконечный цикл.' }); }, 8000); };
-    wWait[id] = d => { clearTimeout(timer); clearInterval(wi); res(d); };
-    const wi = setInterval(() => { if (wReady && !timer) arm(); }, 100);
-    worker.postMessage({ id, code, tests: tests ?? null, ci });
-  });
+  const job = async () => {
+    try { await newWorker(); } catch(e) { return { out: '', ok: false, msg: e.message, infrastructure: true }; }
+    return new Promise(resolve => {
+      const id = ++wSeq;
+      const timer = setTimeout(() => stopWorker('⏱ Выполнение остановлено через 8 секунд. Проверьте цикл.'), 8000);
+      wWait.set(id, data => { clearTimeout(timer); resolve(data); });
+      worker.postMessage({ id, code, tests: tests ?? null, ci });
+    });
+  };
+  const result = pyQueue.then(job, job); pyQueue = result.then(() => {}); return result;
 }
 
 // ---------- поллинг ----------
 let pollTimer = null, polling = null, lastV = 0, S = null, clockOff = 0, lastCv = '', lastEv = -1;
 function startPoll(fn) { polling = fn; lastV = 0; lastCv = ''; lastEv = -1; pollNow(); }
 function stopPoll() { polling = null; clearTimeout(pollTimer); }
+let pollBusy = false;
+function applyState(r) {
+  if (!r || r.same || (S && S.code === r.code && Number(r.v) < lastV)) return;
+  lastV = r.v; lastCv = r.cv || ''; clockOff = r.now - Date.now(); S = r;
+  const ev = r.events || []; if (lastEv >= 0) onEvents(ev);
+  lastEv = ev.length ? Math.max(lastEv, ...ev.map(e => e.id)) : Math.max(lastEv, 0); render();
+}
 async function pollNow() {
   clearTimeout(pollTimer); if (!polling) return;
+  if (pollBusy) { pollTimer = setTimeout(pollNow, POLL_MS); return; } pollBusy = true;
   const fn = polling;
   try {
     const r = await fn(lastV);
     $('#net').textContent = '🟢 онлайн';
-    if (!r.same) { lastV = r.v; lastCv = r.cv || ''; clockOff = r.now - Date.now(); S = r; const ev = r.events || []; if (lastEv >= 0) onEvents(ev); if (ev.length) lastEv = Math.max(lastEv, ...ev.map(e => e.id)); else if (lastEv < 0) lastEv = 0; render(); }
+    if (polling === fn) applyState(r);
   } catch (e) {
     $('#net').textContent = '🔴 нет связи';
     if (/удалил вас/.test(e.message)) { kickedScreen(e.message); $('#net').textContent = ''; return; }
     if (/не найден|доступа/.test(e.message)) { toast(e.message); store.del('pq_student'); store.del('pq_teacher'); stopPoll(); return home(); }
   }
+  finally { pollBusy = false; }
   if (polling === fn) pollTimer = setTimeout(pollNow, document.hidden ? POLL_MS * 3 : POLL_MS);
 }
 let render = () => {};
@@ -205,31 +235,32 @@ function renderTeacher(T) {
     ${(s.kicked || []).length ? `<div class="muted" style="margin:4px 0">Удалены из комнаты: ${s.kicked.map(esc).join(', ')}</div>` : ''}
     <div class="muted" style="margin:4px 0">${rHelp()}</div>${tBlitz(s)}${tFinished(s)}<div class="grid">${teams || '<div class="card">Команд пока нет</div>'}</div>`;
   $('#b-el') && ($('#b-el').onclick = set('election'));
-  $('#app').onclick = e => {
+  $('#app').onclick = async e => {
     const kb = e.target.closest('[data-kick]');
-    if (kb) { if (confirm('Кикнуть «' + kb.dataset.fio + '» из комнаты?\nЕго открытые задачи вернутся капитану, войти снова с этого устройства он не сможет.')) act({ a: 'kick', code: T.code, key: T.key, mid: kb.dataset.kick }, kb).then(() => toast('Игрок удалён')).catch(() => {}); return; }
+    if (kb) { if (await askConfirm('Кикнуть «' + kb.dataset.fio + '» из комнаты?\nЕго открытые задачи вернутся капитану, войти снова с этого устройства он не сможет.')) act({ a: 'kick', code: T.code, key: T.key, mid: kb.dataset.kick }, kb).then(() => toast('Игрок удалён')).catch(() => {}); return; }
     const db = e.target.closest('[data-disband]');
-    if (db) { if (confirm('Расформировать команду «' + db.dataset.name + '»?\nУчастники вернутся к выбору команды, их ответы останутся в таблице.')) act({ a: 'disband', code: T.code, key: T.key, tid: db.dataset.disband }, db).then(() => toast('Команда расформирована')).catch(() => {}); return; }
+    if (db) { if (await askConfirm('Расформировать команду «' + db.dataset.name + '»?\nУчастники вернутся к выбору команды, их ответы останутся в таблице.')) act({ a: 'disband', code: T.code, key: T.key, tid: db.dataset.disband }, db).then(() => toast('Команда расформирована')).catch(() => {}); return; }
     const g = e.target.closest('[data-goto]'); if (g) { e.preventDefault(); openHelp(g.dataset.goto, g.dataset.tid); } };
   $('#b-blitz') && ($('#b-blitz').onclick = e => act({ a: 'blitz', code: T.code, key: T.key }, e.target).then(r => toast('⚡ Блиц запущен: ' + ((TASK[r.task] || {}).title || r.task))).catch(() => {}));
   document.querySelectorAll('details[data-chat]').forEach(d => { d.open = !!openChats[d.dataset.chat]; d.ontoggle = () => openChats[d.dataset.chat] = d.open; });
   $('#b-run') && ($('#b-run').onclick = set('running'));
-  $('#b-close') && ($('#b-close').onclick = e => confirm('Завершить игру? Ответы больше не принимаются.') && set('closed')(e));
+  $('#b-close') && ($('#b-close').onclick = async e => await askConfirm('Завершить игру? Ответы больше не принимаются.') && set('closed')(e));
   $('#b-exp') && ($('#b-exp').onclick = e => act({ a: 'exportRes', code: T.code, key: T.key }, e.target).then(() => toast('Записано в листы Results и TeamResults')));
-  $('#b-leave').onclick = () => { if (confirm('Выйти? Вернуться в комнату будет нельзя (ключ сохраняется только в этом браузере).')) { store.del('pq_teacher'); stopPoll(); home(); } };
+  $('#b-leave').onclick = async () => { if (await askConfirm('Выйти? Вернуться в комнату будет нельзя (ключ сохраняется только в этом браузере).')) { store.del('pq_teacher'); stopPoll(); home(); } };
 }
 
 // ---------- студент ----------
 let ME = null, TAB = 'tasks', growSeen = {};
 function studentStart(s) {
+  newWorker().catch(() => {});
   ME = s; render = renderStudent; taskCards = {}; prevMine = null; TAB = 'tasks';
   $('#app').innerHTML = `<div id="hdr" class="hdr"></div>
     <section class="tab" id="tab-tasks"><div id="main"></div><div id="mylist"></div></section>
     <section class="tab" id="tab-chat" hidden></section>
     <section class="tab" id="tab-teams" hidden><aside id="side"></aside><div id="feed"></div></section>
-    <section class="tab" id="tab-me" hidden></section>
+    <section class="tab" id="tab-achievements" hidden></section><section class="tab" id="tab-me" hidden></section>
     <div id="cardstore" hidden></div>
-    <nav id="tabs">${[['tasks', '📋', 'Задачи'], ['chat', '💬', 'Чат'], ['teams', '🏆', 'Команды'], ['me', '👤', 'Моё']].map(([k, i, n]) => `<button data-tab="${k}" class="${k === TAB ? 'on' : ''}"><span class="ti">${i}</span><span>${n}</span><b class="tb" id="tb-${k}" hidden></b></button>`).join('')}</nav>`;
+    <nav id="tabs">${[['tasks', '📋', 'Задачи'], ['chat', '💬', 'Чат'], ['teams', '🏆', 'Команды'], ['achievements', '🏅', 'Награды'], ['me', '👤', 'Моё']].map(([k, i, n]) => `<button data-tab="${k}" class="${k === TAB ? 'on' : ''}"><span class="ti">${i}</span><span>${n}</span><b class="tb" id="tb-${k}" hidden></b></button>`).join('')}</nav>`;
   document.body.classList.add('student');
   $('#tabs').querySelectorAll('[data-tab]').forEach(b => b.onclick = () => setTab(b.dataset.tab));
   startPoll(v => api({ a: 'state', code: s.code, mid: s.mid, v, cv: lastCv, ev: Math.max(lastEv, 0) }));
@@ -237,7 +268,7 @@ function studentStart(s) {
 function setTab(k) {
   TAB = k; closeTask();
   document.querySelectorAll('#tabs [data-tab]').forEach(b => b.classList.toggle('on', b.dataset.tab === k));
-  ['tasks', 'chat', 'teams', 'me'].forEach(x => { const el = $('#tab-' + x); if (el) el.hidden = x !== k; });
+  ['tasks', 'chat', 'teams', 'achievements', 'me'].forEach(x => { const el = $('#tab-' + x); if (el) el.hidden = x !== k; });
   if (k === 'teams') { feedRead('teams'); renderFeed(); }
   if (k === 'chat') { feedRead('chat'); markRead(); const l = $('#ch-list'); if (l) l.scrollTop = l.scrollHeight; }
   scrollTo(0, 0);
@@ -252,7 +283,7 @@ function renderStudent() {
   if (t && s.pool) { const pk = s.code + t.tid; if (growSeen.k === pk && s.pool.length > growSeen.n) feed('grow:' + pk + ':' + s.pool.length, '📌 В команду добавлено задач: ' + (s.pool.length - growSeen.n) + (t.captain === ME.mid ? ' — распределите их!' : ''), 'teams'); growSeen = { k: pk, n: s.pool.length }; }
   $('#hdr').innerHTML = `<div class="h1"><b>${esc(s.me.fio)}</b> <span class="muted">${esc(s.me.group)} · ${s.code}</span></div>
     <div class="h2">${t ? `${t.solo ? '🧑‍💻 соло' : '👥 ' + esc(t.name)} · <b class="rt">${t.rating || 0}%</b> <span class="muted">${t.pts} б.</span>${t.finished ? ' · 🏁' + t.finished.place : ''}` : esc(STATUS[s.status])}</div>`;
-  renderSide(s); renderMe(s);
+  renderSide(s); renderMe(s); renderUpgrade(s);
   if (t && t.captain && !t.solo) maybeReveal(s);
   renderChat(s); renderBlitz(s); maybeFinale(s); renderFeed();
   const main = $('#main');
@@ -276,7 +307,7 @@ function renderMe(s) {
     <button class="sec wide" id="logout">Выйти из комнаты</button></div>${t && !t.solo ? teamCard(s) : ''}`;
   if (el._h === h) return; el._h = h; el.innerHTML = h;
   $('#b-fin') && ($('#b-fin').onclick = () => showFinale(S));
-  $('#logout').onclick = () => { if (confirm('Выйти из комнаты на этом устройстве?')) { store.del('pq_student'); stopPoll(); closeExtras(); document.body.classList.remove('student'); wizard('choice'); } };
+  $('#logout').onclick = async () => { if (await askConfirm('Выйти из комнаты на этом устройстве?')) { store.del('pq_student'); stopPoll(); closeExtras(); document.body.classList.remove('student'); wizard('choice'); } };
 }
 function renderSide(s) {
   const total = (s.pool && s.pool.length) || 50, mine = s.team && s.team.tid;
@@ -294,7 +325,7 @@ function teamCard(s) {
 }
 function renderTeams(main, s) {
   main.innerHTML = `<div class="card"><h3>Выберите команду</h3><button class="sec" id="tback">← Назад</button> <span class="muted">Список обновляется автоматически</span></div>
-    <div class="grid">${s.teams.map(t => `<div class="team"><h3>${esc(t.name)}</h3>${t.members.map(m => '<div>' + esc(m.fio) + '</div>').join('')}
+    <div class="grid">${s.teams.map(t => `<div class="team"><h3>${esc(t.name)}</h3>${t.members.map(m => '<div>' + esc(m.fio) + ' · ' + (m.pts || 0) + ' б.</div>').join('')}<p><b>${t.pts || 0} б.</b> · ${t.rating || 0}%</p>
       <div class="muted">Участников: <b>${t.members.length}/${s.maxTeam}</b></div>${t.solo ? '<span class="pill solo">Соло</span>' : `<button data-join="${t.tid}" ${t.members.length >= s.maxTeam ? 'disabled' : ''}>${t.members.length >= s.maxTeam ? 'Заполнена' : 'Вступить'}</button>`}</div>`).join('') || '<div class="card">Команд пока нет. Вернитесь назад и создайте свою!</div>'}</div>`;
   $('#tback').onclick = () => { stopPoll(); store.del('pq_student'); wizard('choice'); };
   main.querySelectorAll('[data-join]').forEach(b => b.onclick = e => act({ a: 'joinTeam', code: ME.code, mid: ME.mid, tid: b.dataset.join }, e.target));
@@ -369,8 +400,8 @@ const withPasteNote = (src, tid) => { const v = pc(tid).v; return v.p || v.b ? s
 
 // ---------- задачи ----------
 let taskCards = {};
-const ST = { assigned: 'в работе', solved: 'решена ✔', failed: 'не решена ✘', review: 'на проверке 📝' };
-const CLOSED = x => x && ['solved', 'failed', 'review'].includes(x.st);
+const ST = { skipped: 'нет ответа · 0 б.', assigned: 'в работе', solved: 'решена ✔', failed: 'не решена ✘', review: 'на проверке 📝' };
+const CLOSED = x => x && ['solved', 'failed', 'review', 'skipped'].includes(x.st);
 function renderRunning(main, s) {
   const t = s.team, isCap = t.captain === ME.mid && !t.solo, name = mid => (t.members.find(m => m.mid === mid) || {}).fio || '—';
   const keep = main.contains(document.activeElement) && document.activeElement.tagName === 'SELECT';
@@ -398,26 +429,27 @@ function renderRunning(main, s) {
   notifyAssign(s, mine);
   // список своих задач: открытые сверху, закрытые ниже
   const open = mine.filter(id => !CLOSED(t.tasks[id])), closed = mine.filter(id => CLOSED(t.tasks[id]));
-  const cnt = { solved: 0, failed: 0, review: 0 }; closed.forEach(id => cnt[t.tasks[id].st]++);
-  const li = id => { const x = t.tasks[id], tk = TASK[id]; return `<button class="tcard st-b-${x.st}" data-open="${id}"><span class="tc-top"><span class="pill ${tk.cat}">${catLabel(tk)}</span><span class="tc-st st-${x.st}">${taskCards[id].el.querySelector('.newb') ? '<span class="newb">НОВАЯ</span>' : ''}${ST[x.st] || ''}</span></span><span class="tc-t">${esc(tk.title)}</span><span class="muted">${tk.pts} б.${x.att ? ' · попыток: ' + x.att : ''}</span></button>`; };
-  const lh = `<h2 class="lh">Мои задачи <span class="muted">${open.length} открыто · ✅ ${cnt.solved} · ❌ ${cnt.failed}${cnt.review ? ' · 📝 ' + cnt.review : ''}</span></h2>
+  const cnt = { solved: 0, failed: 0, review: 0, skipped: 0 }; closed.forEach(id => cnt[t.tasks[id].st]++);
+  const li = id => { const x = t.tasks[id], tk = TASK[id]; return `<button class="tcard st-b-${x.st}" data-open="${id}"><span class="tc-top"><span class="pill ${tk.cat}">${catLabel(tk)}</span><span class="tc-st st-${x.st}">${taskCards[id].el.querySelector('.newb') ? '<span class="newb">НОВАЯ</span>' : ''}${ST[x.st] || ''}</span></span><span class="tc-t">${esc(tk.title)}</span><span class="muted">${x.st === 'skipped' ? 0 : tk.pts} б.${x.att ? ' · попыток: ' + x.att : ''}</span></button>`; };
+  const lh = `<h2 class="lh">Мои задачи <span class="muted">${open.length} открыто · ✅ ${cnt.solved} · ❌ ${cnt.failed} · — ${cnt.skipped}${cnt.review ? ' · 📝 ' + cnt.review : ''}</span></h2>
     ${open.map(li).join('') || (closed.length ? '<div class="card muted">Все ваши задачи закрыты 🎉</div>' : `<div class="card muted" id="notasks">${t.solo ? '' : 'Капитан ещё не назначил вам задачи.'}</div>`)}
     ${closed.length ? `<h3 class="lh2">Закрытые</h3>${closed.map(li).join('')}` : ''}`;
   const ml = $('#mylist'); if (ml._h !== lh) { ml.innerHTML = lh; ml._h = lh; ml.querySelectorAll('[data-open]').forEach(b => b.onclick = () => openTask(b.dataset.open)); }
   tabBadge('tasks', document.querySelectorAll('#cardstore .newb, #taskview .newb').length);
-  if (openTid && taskCards[openTid]) { const x = t.tasks[openTid]; $('#tv-st').textContent = ST[x.st] || ''; }
+  if (openTid && taskCards[openTid]) { renderTaskTools(s); const x = t.tasks[openTid]; $('#tv-st').textContent = ST[x.st] || ''; }
 }
 let openTid = null;
 function openTask(id) {
   const c = taskCards[id]; if (!c) return;
   closeTask(true);
+  newWorker().catch(() => {});
   let tv = $('#taskview'); if (!tv) { tv = document.createElement('div'); tv.id = 'taskview'; document.body.appendChild(tv); }
-  tv.innerHTML = `<div class="tv-h"><button class="sec" id="tv-back">← Назад</button><b class="tv-t">${esc(c.tk.title)}</b><span id="tv-st" class="muted"></span></div><div id="tv-body"></div>`;
+  tv.innerHTML = `<div class="tv-h"><button class="sec" id="tv-back">← Назад</button><b class="tv-t">${esc(c.tk.title)}</b><span id="tv-st" class="muted"></span></div><div id="task-team-live"></div><div id="tv-body"></div><div id="task-actions"></div>`;
   $('#tv-body').appendChild(c.el); tv.hidden = false; openTid = id; document.body.classList.add('tv-open');
   if (c.open) c.open(); const nb = document.querySelector(`[data-open="${id}"] .newb`); if (nb) nb.remove();
   $('#tv-back').onclick = () => closeTask();
   if (c.ed) setTimeout(() => c.ed.refresh(), 30);
-  tv.scrollTop = 0; history.pushState({ tv: 1 }, '');
+  renderUpgrade(S); tv.scrollTop = 0; history.pushState({ tv: 1 }, '');
 }
 function closeTask(silent) {
   const tv = $('#taskview'); if (!tv || tv.hidden) return;
@@ -452,12 +484,13 @@ function makeCard(tk, box) {
       b.addEventListener('touchend', e => { e.preventDefault(); ins(); }); b.addEventListener('click', ins);
     });
     const out = el.querySelector('.out');
-    el.querySelector('.run').onclick = async e => { c.runs = (c.runs || 0) + 1; e.target.disabled = true; out.textContent = worker && wReady ? '…' : 'Загрузка Python (первый раз ~10 с)…'; sync(); const r = await runPy(c.ed.getValue()); out.textContent = r.out + (r.msg ? '\n' + r.msg : ''); e.target.disabled = false; };
+    el.querySelector('.run').onclick = async e => { c.runs = (c.runs || 0) + 1; e.target.disabled = true; out.textContent = wReady ? 'Выполняем код…' : 'Подготавливаем Python…'; const r = await runPy(c.ed.getValue()); out.textContent = r.out + (r.msg ? '\n' + r.msg : ''); e.target.disabled = false; };
     el.querySelector('.send').onclick = async e => {
-      c.runs = (c.runs || 0) + 1; e.target.disabled = true; out.textContent = 'Проверка…'; sync();
-      const r = await runPy(c.ed.getValue(), tk.tests, !caseStrict(tk)); out.textContent = r.out + (r.msg ? '\n' + r.msg : '') + (r.ok ? '\n✔ Все тесты пройдены' : '');
-      if (!r.ok) { e.target.disabled = false; return; }
-      try { await act({ a: 'submit', code: ME.code, mid: ME.mid, task: tk.id, passed: true, src: withPasteNote(c.ed.getValue(), tk.id), paste: pasteInfo(tk.id), runs: c.runs }); } catch (x) { e.target.disabled = false; }
+      const checkedSource = c.ed.getValue(); c.busy = true; updateCard(c, S.team.tasks[tk.id]); c.runs = (c.runs || 0) + 1; e.target.disabled = true; out.textContent = wReady ? 'Проверяем тесты…' : 'Подготавливаем Python…';
+      const r = await runPy(checkedSource, tk.tests, !caseStrict(tk)); out.textContent = r.out + (r.msg ? '\n' + r.msg : '') + (r.ok ? '\n✔ Все тесты пройдены' : '');
+      if (!r.ok) { if (!r.infrastructure) { c.failedChecks = (c.failedChecks || 0) + 1; store.set('pq_fail_' + ME.code + '_' + tk.id, c.failedChecks); api({ a: 'codeFailed', code: ME.code, mid: ME.mid, task: tk.id }, true).catch(() => {}); } c.busy = false; updateCard(c, S.team.tasks[tk.id]); e.target.disabled = false; return; }
+      out.textContent += '\nСохраняем результат…';
+      try { await act({ a: 'submit', code: ME.code, mid: ME.mid, task: tk.id, passed: true, src: withPasteNote(checkedSource, tk.id), paste: pasteInfo(tk.id), runs: c.runs, checkFailures: c.failedChecks || store.get('pq_fail_' + ME.code + '_' + tk.id) || 0 }); out.textContent += '\n✔ Ответ сохранён'; } catch (x) { out.textContent += '\n⚠ Не сохранено. Повторите сдачу: решение осталось в редакторе.'; e.target.disabled = false; } finally { c.busy = false; if (S.team?.tasks[tk.id]) updateCard(c, S.team.tasks[tk.id]); }
     };
   } else {
     if (tk.kind === 'order') el.querySelectorAll('.order li').forEach(li => {
@@ -470,7 +503,7 @@ function makeCard(tk, box) {
     el.querySelector('.send').onclick = async e => {
       if (tk.kind === 'free') {
         const txt = el.querySelector('.freeans').value.trim(); if (txt.length < 10) return toast('Напишите развёрнутый ответ');
-        if (!confirm('Отправить ответ преподавателю? Изменить будет нельзя.')) return;
+        if (!await askConfirm('Отправить ответ преподавателю? Изменить будет нельзя.')) return;
         try { await act({ a: 'submit', code: ME.code, mid: ME.mid, task: tk.id, answer: txt, paste: pasteInfo(tk.id) }, e.target); saveAns(txt); toast('📝 Отправлено на проверку'); } catch (x) {} return;
       }
       let ans, shown;
@@ -478,7 +511,7 @@ function makeCard(tk, box) {
       else if (tk.kind === 'mc') { ans = (el.querySelector('input[type=radio]:checked') || {}).value; shown = ans != null ? tk.options[+ans] : ''; }
       else { ans = el.querySelector('.ans').value.trim(); shown = ans; }
       if (ans == null || ans === '') return toast('Выберите или введите ответ');
-      if (tk.kind === 'mc' && !confirm('Попытка одна. Отправить ответ?')) return;
+      if (tk.kind === 'mc' && !await askConfirm('Попытка одна. Отправить ответ?')) return;
       try { const r = await act({ a: 'submit', code: ME.code, mid: ME.mid, task: tk.id, answer: ans, paste: pasteInfo(tk.id) }, e.target); const L = c.ans() || []; L.push((r.correct ? '✔ ' : '✘ ') + shown); saveAns(L); fb(r); } catch (x) {}
     };
   }
@@ -486,13 +519,13 @@ function makeCard(tk, box) {
 }
 function updateCard(c, x) {
   const done = CLOSED(x);
-  c.el.querySelector('.res').innerHTML = done ? `<p class="st-${x.st}">${x.st === 'solved' ? '✔ Задача решена! +' + c.tk.pts + ' б.' : x.st === 'review' ? '📝 На проверке у преподавателя' : '✘ Попытки закончились'}</p>` : (x.att ? `<p class="muted">Попыток использовано: ${x.att}</p>` : '');
+  c.el.querySelector('.res').innerHTML = done ? `<p class="st-${x.st}">${x.st === 'solved' ? '✔ Задача решена! +' + c.tk.pts + ' б.' : x.st === 'review' ? '📝 На проверке у преподавателя' : x.st === 'skipped' ? '— Нет ответа: 0 баллов' : '✘ Попытки закончились — передайте задание или завершите за 0'}</p>` : (x.att ? `<p class="muted">Попыток использовано: ${x.att}</p>` : '');
   const a = c.ans(), sub = c.el.querySelector('.sub');
   const sh = done && a && c.tk.kind !== 'code' ? `<div class="myans"><b>Ваш ответ:</b> ${Array.isArray(a) ? a.map(esc).join('<br>') : esc(a)}</div>` : !done && Array.isArray(a) && a.length ? `<div class="myans muted">Было: ${a.map(esc).join('; ')}</div>` : '';
   if (sub._h !== sh) { sub.innerHTML = sh; sub._h = sh; }
   c.el.classList.toggle('closed', done);
-  c.el.querySelectorAll('button.send, input, .run, textarea, .order button, .keyrow button').forEach(b => b.disabled = done);
-  if (c.ed) c.ed.setOption('readOnly', done ? 'nocursor' : false);
+  c.el.querySelectorAll('button.send, input, .run, textarea, .order button, .keyrow button').forEach(b => b.disabled = done || !!c.busy);
+  if (c.ed) c.ed.setOption('readOnly', done || c.busy ? 'nocursor' : false);
 }
 function board(s) {
   const b = (s.board || []).slice().sort((a, b) => b.rating - a.rating || a.rank - b.rank);
@@ -675,7 +708,7 @@ function openBlitzQ(s) {
   let ov = $('#blitz'); if (!ov) { ov = document.createElement('div'); ov.id = 'blitz'; document.body.appendChild(ov); }
   ov._p = phase;
   const inp = tk.kind === 'mc' ? `<div class="mc">${tk.options.map((o, i) => `<label><input type="radio" name="bl" value="${i}"> ${esc(o)}</label>`).join('')}</div>` : `<input class="ans" id="bl-ans" placeholder="Ваш ответ" autocomplete="off">`;
-  ov.innerHTML = `<div class="bl-box"><h2>⚡ Блиц #${b.n}!</h2><div class="bl-timer" data-deadline="${b.end}"></div><p class="muted">Первые верные: 3 / 2 / 1 балл. Попытка одна!</p><h3>${esc(tk.title)}</h3><p>${tk.desc}</p>${inp}<button id="bl-go">Ответить</button> <button class="sec" id="bl-later">Позже</button> <span class="muted">Ответили: <span class="bl-n">${b.answers || 0}</span></span></div>`;
+  ov.innerHTML = `<div class="bl-box"><h2>⚡ Блиц #${b.n}!</h2><div class="bl-timer" data-deadline="${b.end}"></div><p class="muted">У каждого свой вопрос. Первые верные: 3 / 2 / 1 балл. Попытка одна!</p><h3>${esc(tk.title)}</h3><p>${tk.desc}</p>${inp}<button id="bl-go">Ответить</button> <button class="sec" id="bl-later">Позже</button> <span class="muted">Ответили: <span class="bl-n">${b.answers || 0}</span></span></div>`;
   if ($('#bl-ans')) { guardInput($('#bl-ans'), 'blitz' + b.n); $('#bl-ans').focus(); $('#bl-ans').onkeydown = e => { if (e.key === 'Enter') $('#bl-go').click(); }; }
   $('#bl-later').onclick = () => { ov.remove(); renderBlitz(S); };
   $('#bl-go').onclick = async e => {
@@ -720,5 +753,147 @@ function tChat(t) {
   return `<details data-chat="${t.tid}" class="tchat"><summary>💬 Чат (${ch.length})</summary><div class="ch-ro">${ch.map(m => chatMsgHtml(m, true, null, t.tid)).join('') || '<div class="muted">Сообщений нет</div>'}</div></details>`;
 }
 
-home();
 document.addEventListener('click', e => { if (e.target.closest && e.target.closest('.rhelp')) toast(RATING_HELP, 10000); });
+
+'use strict';
+
+// Shared, accessible confirmations do not block polling or browser controls.
+function askConfirm(message) {
+  return new Promise(resolve => {
+    const old = $('#confirm14'); if (old) return resolve(false);
+    const dialog = document.createElement('dialog'); dialog.id = 'confirm14';
+    dialog.innerHTML = `<form method="dialog"><h2>Подтверждение</h2><p>${esc(message).replace(/\n/g,'<br>')}</p><div class="actions14"><button value="cancel" class="sec">Отмена</button><button value="ok">Подтвердить</button></div></form>`;
+    document.body.appendChild(dialog);
+    dialog.onclose = () => { const ok = dialog.returnValue === 'ok'; dialog.remove(); resolve(ok); };
+    dialog.showModal();
+  });
+}
+
+function setTheme14(theme) {
+  document.documentElement.dataset.theme = theme;
+  try { localStorage.setItem('pq_theme',theme); } catch(e) {}
+  document.querySelectorAll('[data-theme-toggle]').forEach(b => { b.textContent = theme === 'dark' ? '☀ Светлая' : '☾ Тёмная'; b.setAttribute('aria-label', theme === 'dark' ? 'Включить светлую тему' : 'Включить тёмную тему'); });
+  const meta = document.querySelector('meta[name="theme-color"]'); if (meta) meta.content = theme === 'dark' ? '#090d15' : '#f4f6fa';
+}
+function chrome14() {
+  let tools = $('#global-tools14'); if (tools) return;
+  tools = document.createElement('div'); tools.id = 'global-tools14';
+  tools.innerHTML = '<button class="sec" data-theme-toggle></button><button class="sec" id="fullscreen14" aria-label="Переключить полноэкранный режим">⛶ На весь экран</button><button id="rank-toggle14" aria-haspopup="dialog" aria-expanded="false">🏆 Рейтинг</button>';
+  document.body.appendChild(tools);
+  tools.querySelector('[data-theme-toggle]').onclick = () => setTheme14(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
+  $('#fullscreen14').onclick = async () => {
+    try { if (document.fullscreenElement) await document.exitFullscreen(); else if (document.documentElement.requestFullscreen) await document.documentElement.requestFullscreen(); else toast('На этом устройстве полноэкранный режим недоступен'); }
+    catch(e) { toast('Браузер не разрешил полный экран. Игра продолжает работать.'); }
+  };
+  $('#rank-toggle14').onclick = openRank14;
+  document.addEventListener('fullscreenchange', () => { $('#fullscreen14').textContent = document.fullscreenElement ? '⛶ Оконный режим' : '⛶ На весь экран'; });
+  setTheme14(document.documentElement.dataset.theme || 'light');
+}
+let rankOpener14 = null;
+function openRank14() {
+  let dialog = $('#rank14');
+  if (!dialog) {
+    dialog = document.createElement('dialog'); dialog.id = 'rank14';
+    dialog.innerHTML = '<div class="drawer-head14"><div><span class="eyebrow14">ИГРА · ПРЯМО СЕЙЧАС</span><h2>Таблица лидеров</h2></div><button class="sec" id="rank-close14" aria-label="Закрыть рейтинг">✕</button></div><div id="rank-rows14"></div><p class="muted">Обновляется автоматически при наличии связи · примерно раз в 2 секунды.</p>';
+    document.body.appendChild(dialog);
+    $('#rank-close14').onclick = () => dialog.close();
+    dialog.addEventListener('click',e => { if (e.target === dialog) { const r=dialog.getBoundingClientRect(); if (e.clientX < r.left || e.clientY < r.top || e.clientY > r.bottom) dialog.close(); } });
+    dialog.onclose = () => { $('#rank-toggle14').setAttribute('aria-expanded','false'); if (rankOpener14 && rankOpener14.isConnected) rankOpener14.focus(); };
+  }
+  rankOpener14 = document.activeElement; renderRank14(S); dialog.showModal(); $('#rank-toggle14').setAttribute('aria-expanded','true');
+}
+function renderRank14(s) {
+  const el = $('#rank-rows14'); if (!el) return;
+  if (!s || !s.teams) { el.innerHTML = '<p class="muted">Войдите в комнату, чтобы увидеть рейтинг.</p>'; return; }
+  const teams = s.teams.filter(t=>t.members.length).slice().sort((a,b)=>(a.rank || 999)-(b.rank || 999));
+  const h = teams.map((t,i)=>{
+    const name = t.solo ? t.members[0].fio : t.name, points = t.pts ?? t.raw ?? 0;
+    const pct = Math.max(0,Math.min(100,t.rating || 0));
+    return `<article class="rank-card14 ${s.me && s.me.team===t.tid?'mine14':''}"><div class="rank-num14">${['🥇','🥈','🥉'][i] || i+1}</div><div class="rank-info14"><b>${esc(name)}</b><div class="bar"><i style="width:${pct}%"></i></div><span class="muted">${t.solved ?? t.score?.solved ?? 0}/${t.total || 0} задач · ${t.members.length} чел.</span></div><div class="rank-score14"><strong>${t.rating || 0}%</strong><span>${points} б.</span></div></article>`;
+  }).join('') || '<p class="muted">Команды ещё собираются.</p>';
+  if (el._h !== h) { el.innerHTML=h; el._h=h; }
+}
+function renderAwards14(s) {
+  const el = $('#tab-achievements'); if (!el) return;
+  const me=s.me, st=me.streak || {current:0,best:0,bonus:0};
+  const awards=s.team?.achievements?.[ME.mid] || [];
+  const milestones=[3,5,10].map(n=>`<article class="award14 ${st.best>=n?'earned14':''}"><span>${st.best>=n?'🔥':'◇'}</span><b>${n} подряд</b><p>Решите ${n} заданий подряд с первой попытки.</p><progress max="${n}" value="${Math.min(n,st.best)}"></progress><small>${Math.min(n,st.best)}/${n}</small></article>`).join('');
+  const h=`<div class="hero14"><span class="eyebrow14">ВАШ ПРОГРЕСС</span><h2>Достижения</h2><p>Успех складывается из маленьких шагов.</p><div class="stats14"><div><strong>${st.current}</strong><span>сейчас подряд</span></div><div><strong>${st.best}</strong><span>лучшая серия</span></div><div><strong>+${st.bonus}</strong><span>бонус серии / 5</span></div></div></div><p class="muted">Каждые 3 верных решения подряд с первой попытки: +1 балл, максимум +5 за игру. Ошибка, передача или «нет ответа» сбрасывает текущую серию. Блиц в серию не входит.</p><div class="awards14">${milestones}</div><div class="card"><h3>Награды за игру</h3>${awards.length?awards.map(a=>`<div class="ach"><b>🏅 ${esc(a.t)}</b><span>${esc(a.d)}</span></div>`).join(''):'<p class="muted">Решайте задачи — здесь появятся ваши награды.</p>'}<p class="muted">Награды во время игры предварительные; итоговые определяются при завершении.</p></div>`;
+  if(el._h!==h){el.innerHTML=h;el._h=h;}
+}
+function teamLive14(s) {
+  const t=s.team; if(!t) return '';
+  const st=s.me.streak || {current:0};
+  return `<div class="team-live14"><div><span class="eyebrow14">${t.solo?'ЛИЧНЫЙ РЕЗУЛЬТАТ':'ВАША КОМАНДА'}</span><b>${esc(t.name)}</b></div><strong>${t.pts} б.</strong><span>${t.rating}% · #${t.rank || '—'}</span><span class="streak14">🔥 ${st.current} подряд</span></div>${!t.solo?`<details class="roster14"><summary>Состав команды · ${t.members.length} участника</summary>${t.members.map(m=>`<div><span>${m.mid===t.captain?'★ ':''}${esc(m.fio)}</span><b>${m.pts} б.</b></div>`).join('')}</details>`:''}`;
+}
+function renderTaskTools(s) {
+  const el=$('#task-actions'); if(!el || !openTid || !s.team) return;
+  const id=openTid,x=s.team.tasks[id]; if(!x) return;
+  const can=s.status==='running' && x.to===ME.mid && !['solved','review','skipped'].includes(x.st);
+  const peers=s.team.members.filter(m=>m.mid!==ME.mid);
+  const h=can?`<div class="card task-tools14"><h3>Застряли на задании?</h3>${peers.length && !x.transfers?`<label>Передать сокоманднику<select id="transfer-to14"><option value="">Выберите участника</option>${peers.map(m=>`<option value="${esc(m.mid)}">${esc(m.fio)}</option>`).join('')}</select></label><button class="sec" id="transfer14">Передать задание</button><p class="muted">Одна передача на задание. История попыток сохраняется.</p>`:x.transfers?'<p class="muted">Задание уже передано вам. Можно решить его или завершить за 0.</p>':''}<button class="sec" id="skip14">Нет ответа — завершить за 0</button></div>`:'';
+  if(el._h===h)return; el._h=h; el.innerHTML=h;
+  const transfer=$('#transfer14'); if(transfer)transfer.onclick=async()=>{
+    const to=$('#transfer-to14').value; if(!to)return toast('Выберите сокомандника');
+    if(!await askConfirm('Передать задание выбранному участнику? Текущая серия прервётся.'))return;
+    try{await act({a:'transfer',code:ME.code,mid:ME.mid,task:id,to},transfer);closeTask();toast('Задание передано');}catch(e){}
+  };
+  const skip=$('#skip14'); if(skip)skip.onclick=async()=>{
+    if(!await askConfirm('Завершить задание без ответа за 0 баллов? Вернуть его в работу будет нельзя.'))return;
+    try{await act({a:'skip',code:ME.code,mid:ME.mid,task:id},skip);toast('Задание завершено без ответа');}catch(e){}
+  };
+}
+function renderFocus14(s) {
+  const el=$('#tab-me'); if(!el)return;
+  let panel=$('#focus-status14'); if(!panel){panel=document.createElement('div');panel.id='focus-status14';panel.className='card';el.appendChild(panel);}
+  const f=s.me.focus || {},h=`<h3>Режим внимания ${s.focusEnabled?'включён':'выключен'}</h3><p>Вне вкладки: ${Math.round((f.awayMs || 0)/1000)} с · штраф: <b>−${f.penalty || 0} б.</b></p>${s.focusEnabled?'<p class="muted">После возвращения: первые 10 секунд без штрафа, затем −1 за каждые полные 30 секунд. Максимум −5 за игру, итог не ниже нуля. Выход из полного экрана сам по себе не штрафуется.</p>':''}`;
+  if(panel.innerHTML!==h)panel.innerHTML=h;
+}
+function renderUpgrade(s) {
+  chrome14(); renderRank14(s); renderAwards14(s); renderFocus14(s);
+  if(!s?.me)return;
+  const btn=$('#rank-toggle14'); btn.textContent=s.team?`🏆 #${s.team.rank || '—'} · ${s.team.pts} б.`:'🏆 Рейтинг';
+  const live=$('#task-team-live'); if(live){const h=teamLive14(s);if(live._h!==h){const open=live.querySelector('details')?.open;live.innerHTML=h;live._h=h;if(open && live.querySelector('details'))live.querySelector('details').open=true;}}
+  renderTaskTools(s);
+  if(s.focusEnabled && s.status==='running' && !SS.get('focus_notice_'+s.code)) {
+    SS.set('focus_notice_'+s.code,true); toast('Режим внимания включён. Правила штрафов — во вкладке «Моё».',4000);
+  }
+  if(s.status!=='running' || !s.focusEnabled){SS.set('focus_pending14',null);}
+}
+
+// Server timestamps and event IDs avoid duplicate charges after reload/retry.
+let focusStart14 = null, focusReturning14 = false;
+async function returnFocus14() {
+  const pending=SS.get('focus_pending14'); if(!pending || focusReturning14 || document.hidden)return;
+  if(!ME || pending.code!==ME.code || pending.mid!==ME.mid)return;
+  focusReturning14=true;
+  try {
+    if(focusStart14)await focusStart14;
+    const r=await act({a:'focus',code:ME.code,mid:ME.mid,id:pending.id,phase:'end'});
+    SS.set('focus_pending14',null); if(r.deducted)toast(`Вне вкладки ${r.seconds} с. Списано ${r.deducted} б.; всего −${r.penalty}.`,4000);
+  }catch(e){}finally{focusReturning14=false;focusStart14=null;}
+}
+document.addEventListener('visibilitychange',()=>{
+  if(!document.hidden){returnFocus14();pollNow();return;}
+  if(!ME || !S?.me || S.status!=='running' || !S.focusEnabled || SS.get('focus_pending14'))return;
+  const id=Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,10);
+  SS.set('focus_pending14',{id,code:ME.code,mid:ME.mid});
+  focusStart14=api({a:'focus',code:ME.code,mid:ME.mid,id,phase:'start'},true).catch(()=>{});
+});
+setInterval(()=>{if(!document.hidden)returnFocus14();},10000);
+
+const teacherRender14=renderTeacher;
+renderTeacher=function(T){
+  teacherRender14(T);chrome14();renderRank14(S);
+  const s=S;let settings=$('#teacher-focus14');
+  if(!settings){settings=document.createElement('section');settings.id='teacher-focus14';settings.className='card';$('#app').appendChild(settings);}
+  settings.innerHTML=`<h3>Режим внимания</h3>${s.status==='lobby'?`<label class="check14"><input type="checkbox" id="focus-enabled14" ${s.focusEnabled?'checked':''}> Учитывать уход со страницы и применять штрафы</label>`:`<p>${s.focusEnabled?'Включён':'Выключен'} · выбирается до начала игры</p>`}<p class="muted">10 секунд без штрафа, затем −1 за каждые полные 30 секунд отсутствия, максимум −5 за игру.</p>${s.teams.flatMap(t=>t.members).map(m=>`<div class="focus-row14"><span>${esc(m.fio)}</span><span>🔥 ${m.streak?.current || 0} · вне вкладки ${Math.round((m.focus?.awayMs || 0)/1000)} с · −${m.focus?.penalty || 0} б.</span></div>`).join('')}`;
+  const check=$('#focus-enabled14');if(check)check.onchange=()=>act({a:'focusSettings',code:T.code,key:T.key,enabled:check.checked},check).catch(()=>{});
+};
+const teacherBlitz14=tBlitz;
+tBlitz=function(s){
+  const h=teacherBlitz14(s),b=s.blitz;if(!b?.questions)return h;
+  return h+`<details class="card"><summary>Индивидуальные вопросы блица · ${b.questions.length}</summary>${b.questions.map(q=>`<div class="focus-row14"><span>${esc(q.fio)}</span><span>${esc(TASK[q.task]?.title || q.task)} · ${esc(q.task)}</span></div>`).join('')}</details>`;
+};
+document.addEventListener('click',e=>{if(e.target.closest?.('.rhelp'))setTimeout(()=>toast('Места — по рейтингу. Рейтинг: процент баллов за задачи + бонусы на участника (до +15) − штраф на участника. Каждые 3 решения с первой попытки: +1, максимум +5 за игру. Итог не ниже нуля.',4000),0);});
+chrome14();home();
